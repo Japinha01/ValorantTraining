@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8">
+  <title>Painel de Treino</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      background: #f0f2f5;
+      padding-top: 40px;
+    }
+    h1 {
+      margin-bottom: 10px;
+    }
+    .cronometro {
+      font-size: 48px;
+      margin: 20px 0;
+      font-weight: bold;
+    }
+    .botoes button {
+      margin: 10px;
+      padding: 12px 24px;
+      font-size: 16px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: 0.3s;
+    }
+    .botoes button:hover {
+      opacity: 0.9;
+    }
+    #checkin { background: #28a745; color: white; }
+    #pausar  { background: #ffc107; }
+    #retomar { background: #17a2b8; color: white; }
+    #finalizar { background: #dc3545; color: white; }
+    #logout {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      padding: 8px 16px;
+      background: #343a40;
+      color: white;
+      text-decoration: none;
+      border-radius: 4px;
+    }
+    #relatorio-box {
+      margin-top: 30px;
+      font-size: 18px;
+      background: white;
+      display: inline-block;
+      padding: 15px;
+      border-radius: 8px;
+      box-shadow: 0 0 8px rgba(0,0,0,0.1);
+    }
+  </style>
+</head>
+<body>
+
+  <a id="logout" href="/logout">Sair</a>
+  <h1>Olá, {{ nome }}!</h1>
+  <div class="cronometro" id="cronometro">00:00:00</div>
+
+  <div class="botoes">
+    <button id="checkin">Check-in</button>
+    <button id="pausar" disabled>Pausar</button>
+    <button id="retomar" disabled>Retomar</button>
+    <button id="finalizar" disabled>Finalizar</button>
+  </div>
+
+  <div id="relatorio-box"></div>
+
+  <script>
+    let cronometroInterval = null;
+    let tempoTotal = 0;
+    let pausado = false;
+
+    function formatarTempo(segundos) {
+      const h = String(Math.floor(segundos / 3600)).padStart(2, '0');
+      const m = String(Math.floor((segundos % 3600) / 60)).padStart(2, '0');
+      const s = String(segundos % 60).padStart(2, '0');
+      return `${h}:${m}:${s}`;
+    }
+
+    function iniciarCronometro() {
+      if (cronometroInterval) clearInterval(cronometroInterval);
+      cronometroInterval = setInterval(() => {
+        if (!pausado) {
+          tempoTotal++;
+          document.getElementById('cronometro').textContent = formatarTempo(tempoTotal);
+        }
+      }, 1000);
+    }
+
+    document.getElementById('checkin').onclick = () => {
+      fetch('/checkin', { method: 'POST' })
+        .then(res => res.json())
+        .then(() => {
+          tempoTotal = 0;
+          pausado = false;
+          iniciarCronometro();
+          document.getElementById('pausar').disabled = false;
+          document.getElementById('retomar').disabled = true;
+          document.getElementById('finalizar').disabled = false;
+          document.getElementById('checkin').disabled = true;
+        });
+    };
+
+    document.getElementById('pausar').onclick = () => {
+      fetch('/pausar', { method: 'POST' })
+        .then(res => res.json())
+        .then(() => {
+          pausado = true;
+          document.getElementById('pausar').disabled = true;
+          document.getElementById('retomar').disabled = false;
+        });
+    };
+
+    document.getElementById('retomar').onclick = () => {
+      fetch('/retomar', { method: 'POST' })
+        .then(res => res.json())
+        .then(() => {
+          pausado = false;
+          document.getElementById('pausar').disabled = false;
+          document.getElementById('retomar').disabled = true;
+        });
+    };
+
+    document.getElementById('finalizar').onclick = () => {
+      fetch('/finalizar', { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
+          pausado = true;
+          clearInterval(cronometroInterval);
+          document.getElementById('relatorio-box').innerHTML = `
+            <h3>Relatório Final:</h3>
+            <pre>${data.relatorio}</pre>
+          `;
+          document.getElementById('checkin').disabled = false;
+          document.getElementById('pausar').disabled = true;
+          document.getElementById('retomar').disabled = true;
+          document.getElementById('finalizar').disabled = true;
+        });
+    };
+  </script>
+</body>
+</html>
