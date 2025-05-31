@@ -1,25 +1,37 @@
 from flask import Flask, request, jsonify, render_template, session, redirect, url_for
 from datetime import datetime, timedelta
-import requests
+import sqlite3
 import os
+from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
+import requests
 
 app = Flask(__name__)
-app.secret_key = 'sua_chave_super_secreta_aqui'
+app.secret_key = 'TreinoMaster'
 
-USUARIOS = {
-    'Japa': 'japa19',
-    'White': 'white12',
-    'Tata': 'tata15',
-    'Debora': 'deb23',
-    'Iza': 'iza72',
-}
-
-sessoes = {}
-
+DB_NAME = 'ponto.db'
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '8015668113:AAHW99YDOsrecBE9Ezh7pz3TvlhTHfEMcaE')
 CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '1742433608')
 
+# --- Banco de Dados ---
+def init_db():
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS usuarios (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        username TEXT UNIQUE NOT NULL,
+                        senha_hash TEXT NOT NULL)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS registros (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        usuario_id INTEGER,
+                        tipo TEXT,
+                        timestamp TEXT,
+                        FOREIGN KEY(usuario_id) REFERENCES usuarios(id))''')
+        conn.commit()
+
+init_db()
+
+# --- Envio para Telegram ---
 def notificar_mensagem(mensagem):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': CHAT_ID, 'text': mensagem}
@@ -28,53 +40,19 @@ def notificar_mensagem(mensagem):
     except Exception as e:
         print(f"Erro ao enviar mensagem para Telegram: {e}")
 
-def calcular_tempo_total(registro):
-    inicio = datetime.strptime(registro['inicio'], '%Y-%m-%d %H:%M:%S')
-    fim = datetime.strptime(registro['fim'], '%Y-%m-%d %H:%M:%S')
-    total = fim - inicio
-    for pausa in registro['pausas']:
-        if pausa['retomada']:
-            inicio_pausa = datetime.strptime(pausa['inicio'], '%Y-%m-%d %H:%M:%S')
-            fim_pausa = datetime.strptime(pausa['retomada'], '%Y-%m-%d %H:%M:%S')
-            total -= (fim_pausa - inicio_pausa)
-    return total
-
-def calcular_tempo_pausas(registro):
-    pausa_total = timedelta(0)
-    for pausa in registro['pausas']:
-        if pausa['retomada']:
-            inicio_pausa = datetime.strptime(pausa['inicio'], '%Y-%m-%d %H:%M:%S')
-            fim_pausa = datetime.strptime(pausa['retomada'], '%Y-%m-%d %H:%M:%S')
-            pausa_total += fim_pausa - inicio_pausa
-        else:
-            inicio_pausa = datetime.strptime(pausa['inicio'], '%Y-%m-%d %H:%M:%S')
-            pausa_total += datetime.now() - inicio_pausa
-    return pausa_total
-
-def formatar_timedelta(td):
-    total_segundos = int(td.total_seconds())
-    horas = total_segundos // 3600
-    minutos = (total_segundos % 3600) // 60
-    segundos = total_segundos % 60
-    return f"{horas}h {minutos}m {segundos}s"
-
+# --- Decorador de Login ---
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if 'username' not in session:
+        if 'usuario_id' not in session:
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
 
+# --- Rotas ---
 @app.route('/')
-def home():
-    if 'username' in session:
-        return redirect(url_for('ponto'))
-    return redirect(url_for('login'))
-
-@app.route('/ponto')
 @login_required
-def ponto():
+def index():
     return render_template('index.html', nome=session['username'])
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -82,81 +60,144 @@ def login():
     if request.method == 'POST':
         username = request.form.get('username')
         password = request.form.get('password')
-        if username in USUARIOS and USUARIOS[username] == password:
-            session['username'] = username
-            return redirect(url_for('ponto'))
-        else:
-            return render_template('login.html', erro='Usuário ou senha inválidos')
+        with sqlite3.connect(DB_NAME) as conn:
+            c = conn.cursor()
+            c.execute('SELECT id, senha_hash FROM usuarios WHERE username = ?', (username,))
+            user = c.fetchone()
+            if user and password == user[1]:  # ou use check_password_hash(user[1], password)
+                session['usuario_id'] = user[0]
+                session['username'] = username
+                return redirect(url_for('index'))
+        return 'Login falhou'
     return render_template('login.html')
 
 @app.route('/logout')
+@login_required
 def logout():
-    session.pop('username', None)
+    session.clear()
     return redirect(url_for('login'))
 
 @app.route('/checkin', methods=['POST'])
 @login_required
 def checkin():
-    nome = session['username']
-    sessoes[nome] = {
-        'inicio': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'pausas': [],
-        'fim': None
-    }
-    notificar_mensagem(f'✅ {nome} fez CHECK-IN às {sessoes[nome]["inicio"]}')
-    return jsonify({'status': 'Check-in registrado'})
+    usuario_id = session['usuario_id']
+    username = session['username']
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    tipo = "checkin"
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute('INSERT INTO registros (usuario_id, tipo, timestamp) VALUES (?, ?, ?)',
+                  (usuario_id, tipo, timestamp))
+        conn.commit()
+    notificar_mensagem(f"✅ {username} fez CHECK-IN às {timestamp}")
+    return jsonify({'status': 'ok'})
 
 @app.route('/pausar', methods=['POST'])
 @login_required
 def pausar():
-    nome = session['username']
-    if nome in sessoes:
-        sessoes[nome]['pausas'].append({
-            'inicio': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'retomada': None
-        })
-        notificar_mensagem(f'⏸ {nome} PAUSOU às {sessoes[nome]["pausas"][-1]["inicio"]}')
-        return jsonify({'status': 'Pausa registrada'})
-    return jsonify({'erro': 'Usuário não encontrado'}), 404
+    usuario_id = session['usuario_id']
+    username = session['username']
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    tipo = "pausa"
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute('INSERT INTO registros (usuario_id, tipo, timestamp) VALUES (?, ?, ?)',
+                  (usuario_id, tipo, timestamp))
+        conn.commit()
+    notificar_mensagem(f"⏸ {username} PAUSOU às {timestamp}")
+    return jsonify({'status': 'ok'})
 
 @app.route('/retomar', methods=['POST'])
 @login_required
 def retomar():
-    nome = session['username']
-    if nome in sessoes and sessoes[nome]['pausas']:
-        sessoes[nome]['pausas'][-1]['retomada'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        notificar_mensagem(f'▶️ {nome} RETOMOU às {sessoes[nome]["pausas"][-1]["retomada"]}')
-        return jsonify({'status': 'Retomada registrada'})
-    return jsonify({'erro': 'Usuário ou pausa não encontrados'}), 404
+    usuario_id = session['usuario_id']
+    username = session['username']
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    tipo = "retomar"
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute('INSERT INTO registros (usuario_id, tipo, timestamp) VALUES (?, ?, ?)',
+                  (usuario_id, tipo, timestamp))
+        conn.commit()
+    notificar_mensagem(f"▶ {username} RETOMOU às {timestamp}")
+    return jsonify({'status': 'ok'})
 
 @app.route('/finalizar', methods=['POST'])
 @login_required
 def finalizar():
-    nome = session['username']
-    if nome in sessoes:
-        sessoes[nome]['fim'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        registro = sessoes[nome]
-        tempo_ativo = calcular_tempo_total(registro)
-        tempo_pausa = calcular_tempo_pausas(registro)
-        qtd_pausas = len(registro['pausas'])
-        data_inicio = registro['inicio'].split(' ')[0]
-        mensagem_relatorio = (
-            f"🏁 {nome} FINALIZOU às {registro['fim']}\n"
-            f"📅 Data: {data_inicio}\n"
-            f"⏰ Início: {registro['inicio']}\n"
-            f"⏰ Fim: {registro['fim']}\n"
-            f"⏱ Tempo total ativo: {tempo_ativo}\n"
-            f"⏸ Tempo total de pausas: {tempo_pausa}\n"
-            f"🔁 Quantidade de pausas: {qtd_pausas}"
-        )
-        notificar_mensagem(mensagem_relatorio)
-        return jsonify({'status': 'Finalizado', 'relatorio': mensagem_relatorio})
-    return jsonify({'erro': 'Usuário não encontrado'}), 404
+    usuario_id = session['usuario_id']
+    username = session['username']
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    tipo = "finalizar"
 
-@app.route('/relatorio', methods=['GET'])
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        # Pega o último checkin para esta jornada
+        c.execute('SELECT timestamp FROM registros WHERE usuario_id = ? AND tipo = "checkin" ORDER BY timestamp DESC LIMIT 1', (usuario_id,))
+        row = c.fetchone()
+        if not row:
+            return jsonify({'status': 'erro', 'mensagem': 'Nenhum check-in encontrado'})
+
+        inicio_checkin = row[0]
+
+        # Salva o finalizar
+        c.execute('INSERT INTO registros (usuario_id, tipo, timestamp) VALUES (?, ?, ?)',
+                  (usuario_id, tipo, timestamp))
+
+        # Pega todos os eventos após o último checkin
+        c.execute('''
+            SELECT tipo, timestamp FROM registros 
+            WHERE usuario_id = ? AND timestamp >= ? 
+            ORDER BY timestamp
+        ''', (usuario_id, inicio_checkin))
+        eventos = c.fetchall()
+
+    inicio = datetime.strptime(inicio_checkin, '%Y-%m-%d %H:%M:%S')
+    fim = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+
+    pausas = []
+    retomadas = []
+
+    for tipo_evento, ts in eventos:
+        dt = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
+        if tipo_evento == 'pausa':
+            pausas.append(dt)
+        elif tipo_evento == 'retomar':
+            retomadas.append(dt)
+
+    pausa_total = timedelta()
+    for p, r in zip(pausas, retomadas):
+        if r > p:
+            pausa_total += (r - p)
+
+    tempo_total = fim - inicio
+    tempo_ativo = tempo_total - pausa_total
+    if tempo_ativo.total_seconds() < 0:
+        tempo_ativo = timedelta(0)
+
+    relatorio = (
+        f"📅 Data: {inicio.date()}\n"
+        f"⏰ Início: {inicio.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"⏰ Fim: {fim.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"⏱ Tempo total ativo: {str(tempo_ativo)}\n"
+        f"⏸ Tempo total de pausas: {str(pausa_total)}\n"
+        f"🔁 Quantidade de pausas: {len(pausas)}"
+    )
+
+    notificar_mensagem(f"🌟 {username} FINALIZOU às {timestamp}\n\nRELATÓRIO FINAL\n{relatorio}")
+
+    return jsonify({'status': 'ok', 'relatorio': relatorio})
+
+@app.route('/registros')
 @login_required
-def relatorio():
-    nome = session['username']
-    if nome in sessoes:
-        return jsonify({nome: sessoes[nome]})
-    return jsonify({'erro': 'Usuário não encontrado'}), 404
+def registros():
+    usuario_id = session['usuario_id']
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute('SELECT tipo, timestamp FROM registros WHERE usuario_id = ? ORDER BY timestamp DESC',
+                  (usuario_id,))
+        dados = c.fetchall()
+    return jsonify(dados)
+
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=5000)
