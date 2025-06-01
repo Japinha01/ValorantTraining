@@ -1,10 +1,13 @@
 from flask import Flask, request, jsonify, render_template, session, redirect, url_for
 from datetime import datetime, timedelta
+from pytz import timezone
 import sqlite3
 import os
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 import requests
+
+now = datetime.now(timezone('America/Sao_Paulo'))
 
 app = Flask(__name__)
 app.secret_key = 'TreinoMaster'
@@ -64,7 +67,7 @@ def login():
             c = conn.cursor()
             c.execute('SELECT id, senha_hash FROM usuarios WHERE username = ?', (username,))
             user = c.fetchone()
-            if user and password == user[1]:  # ou use check_password_hash(user[1], password)
+            if user and password == user[1]:
                 session['usuario_id'] = user[0]
                 session['username'] = username
                 return redirect(url_for('index'))
@@ -90,7 +93,7 @@ def checkin():
                   (usuario_id, tipo, timestamp))
         conn.commit()
     notificar_mensagem(f"✅ {username} fez CHECK-IN às {timestamp}")
-    return jsonify({'status': 'ok'})
+    return jsonify({'status': 'ok', 'checkin': timestamp})
 
 @app.route('/pausar', methods=['POST'])
 @login_required
@@ -132,19 +135,14 @@ def finalizar():
 
     with sqlite3.connect(DB_NAME) as conn:
         c = conn.cursor()
-        # Pega o último checkin para esta jornada
         c.execute('SELECT timestamp FROM registros WHERE usuario_id = ? AND tipo = "checkin" ORDER BY timestamp DESC LIMIT 1', (usuario_id,))
         row = c.fetchone()
         if not row:
             return jsonify({'status': 'erro', 'mensagem': 'Nenhum check-in encontrado'})
 
         inicio_checkin = row[0]
-
-        # Salva o finalizar
         c.execute('INSERT INTO registros (usuario_id, tipo, timestamp) VALUES (?, ?, ?)',
                   (usuario_id, tipo, timestamp))
-
-        # Pega todos os eventos após o último checkin
         c.execute('''
             SELECT tipo, timestamp FROM registros 
             WHERE usuario_id = ? AND timestamp >= ? 
@@ -187,6 +185,64 @@ def finalizar():
     notificar_mensagem(f"🌟 {username} FINALIZOU às {timestamp}\n\nRELATÓRIO FINAL\n{relatorio}")
 
     return jsonify({'status': 'ok', 'relatorio': relatorio})
+
+from datetime import datetime
+
+@app.route('/estado', methods=['GET'])
+@login_required
+def estado():
+    usuario_id = session['usuario_id']
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute('''
+            SELECT tipo, timestamp FROM registros 
+            WHERE usuario_id = ? 
+            ORDER BY timestamp
+        ''', (usuario_id,))
+        eventos = c.fetchall()
+
+    checkin_time = None
+    pausas = []
+    retomadas = []
+    finalizou = False
+
+    for tipo, ts in eventos:
+        if tipo == 'checkin':
+            checkin_time = datetime.fromisoformat(ts)
+            pausas = []
+            retomadas = []
+            finalizou = False
+        elif tipo == 'pausa':
+            pausas.append(datetime.fromisoformat(ts))
+        elif tipo == 'retomar':
+            retomadas.append(datetime.fromisoformat(ts))
+        elif tipo == 'finalizar':
+            finalizou = True
+
+    if not checkin_time or finalizou:
+        return jsonify({'estado': 'inativo', 'tempo_ativo': 0})
+
+    # Cálculo do tempo total ativo
+    agora = datetime.now()
+    tempo_total = 0
+    ultima = checkin_time
+
+    for pausa, retomar in zip(pausas, retomadas):
+        tempo_total += (pausa - ultima).total_seconds()
+        ultima = retomar
+
+    # Se há pausa sem retomar, considera que está pausado
+    if len(pausas) > len(retomadas):
+        estado = 'pausado'
+        tempo_total += (pausas[-1] - ultima).total_seconds()
+    else:
+        estado = 'ativo'
+        tempo_total += (agora - ultima).total_seconds()
+
+    return jsonify({
+        'estado': estado,
+        'tempo_ativo': int(tempo_total)
+    })
 
 @app.route('/registros')
 @login_required
