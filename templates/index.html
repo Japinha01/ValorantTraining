@@ -70,78 +70,98 @@
 
   <div id="relatorio-box"></div>
 
- <script>
-  let cronometroInterval = null;
-  let tempoTotal = 0;
-  let pausado = false;
+  <script>
+    let cronometroInterval = null;
+    let tempoTotal = 0;
+    let pausado = false;
 
-  function formatarTempo(segundos) {
-    const h = String(Math.floor(segundos / 3600)).padStart(2, '0');
-    const m = String(Math.floor((segundos % 3600) / 60)).padStart(2, '0');
-    const s = String(segundos % 60).padStart(2, '0');
-    return `${h}:${m}:${s}`;
+    function formatarTempo(segundos) {
+      const h = String(Math.floor(segundos / 3600)).padStart(2, '0');
+      const m = String(Math.floor((segundos % 3600) / 60)).padStart(2, '0');
+      const s = String(segundos % 60).padStart(2, '0');
+      return `${h}:${m}:${s}`;
+    }
+
+cronometroInterval = null;
+let tempoInicial = 0;
+let inicioReal = null;
+
+function iniciarCronometro() {
+  if (cronometroInterval) clearInterval(cronometroInterval);
+  inicioReal = Date.now();
+
+  cronometroInterval = setInterval(() => {
+    if (!pausado) {
+      const agora = Date.now();
+      const decorrido = Math.floor((agora - inicioReal) / 1000);
+      const tempoAtual = tempoInicial + decorrido;
+      document.getElementById('cronometro').textContent = formatarTempo(tempoAtual);
+    }
+  }, 1000);
+}
+
+function atualizarInterface(estado) {
+  tempoInicial = parseInt(estado.tempo_ativo) || 0;
+  pausado = estado.estado === 'pausado';
+
+  if (estado.estado === 'inativo') {
+    document.getElementById('cronometro').textContent = formatarTempo(0);
+    document.getElementById('checkin').disabled = false;
+    document.getElementById('pausar').disabled = true;
+    document.getElementById('retomar').disabled = true;
+    document.getElementById('finalizar').disabled = true;
+    clearInterval(cronometroInterval);
+  } else {
+    document.getElementById('checkin').disabled = true;
+    document.getElementById('pausar').disabled = pausado;
+    document.getElementById('retomar').disabled = !pausado;
+    document.getElementById('finalizar').disabled = false;
+
+    iniciarCronometro();
   }
+}
 
-  function iniciarCronometro() {
-    if (cronometroInterval) clearInterval(cronometroInterval);
-    cronometroInterval = setInterval(() => {
-      if (!pausado) {
-        tempoTotal++;
-        document.getElementById('cronometro').textContent = formatarTempo(tempoTotal);
-      }
-    }, 1000);
-  }
+    function carregarEstado() {
+      fetch('/estado')
+        .then(res => res.json())
+        .then(estado => atualizarInterface(estado))
+        .catch(err => console.error('Erro ao carregar estado:', err));
+    }
 
-  document.getElementById('checkin').onclick = () => {
-    fetch('/checkin', { method: 'POST' })
-      .then(res => res.json())
-      .then(() => {
-        tempoTotal = 0;
-        pausado = false;
-        iniciarCronometro();
-        document.getElementById('pausar').disabled = false;
-        document.getElementById('retomar').disabled = true;
-        document.getElementById('finalizar').disabled = false;
-        document.getElementById('checkin').disabled = true;
-      });
-  };
+    document.getElementById('checkin').onclick = () => {
+      fetch('/checkin', { method: 'POST' })
+        .then(res => res.json())
+        .then(() => carregarEstado());
+    };
 
-  document.getElementById('pausar').onclick = () => {
-    fetch('/pausar', { method: 'POST' })
-      .then(res => res.json())
-      .then(() => {
-        pausado = true;
-        document.getElementById('pausar').disabled = true;
-        document.getElementById('retomar').disabled = false;
-      });
-  };
+    document.getElementById('pausar').onclick = () => {
+      fetch('/pausar', { method: 'POST' })
+        .then(res => res.json())
+        .then(() => carregarEstado());
+    };
 
-  document.getElementById('retomar').onclick = () => {
-    fetch('/retomar', { method: 'POST' })
-      .then(res => res.json())
-      .then(() => {
-        pausado = false;
-        document.getElementById('pausar').disabled = false;
-        document.getElementById('retomar').disabled = true;
-      });
-  };
+    document.getElementById('retomar').onclick = () => {
+      fetch('/retomar', { method: 'POST' })
+        .then(res => res.json())
+        .then(() => carregarEstado());
+    };
 
-  document.getElementById('finalizar').onclick = () => {
-    fetch('/finalizar', { method: 'POST' })
-      .then(res => res.json())
-      .then(data => {
-        pausado = true;
-        clearInterval(cronometroInterval);
-        document.getElementById('relatorio-box').innerHTML = `
-          <h3>Relatório Final:</h3>
-          <pre>${data.relatorio}</pre>
-        `;
-        document.getElementById('checkin').disabled = false;
-        document.getElementById('pausar').disabled = true;
-        document.getElementById('retomar').disabled = true;
-        document.getElementById('finalizar').disabled = true;
-      });
-  };
-</script>
+    document.getElementById('finalizar').onclick = () => {
+      fetch('/finalizar', { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
+          pausado = true;
+          clearInterval(cronometroInterval);
+          document.getElementById('relatorio-box').innerHTML = `
+            <h3>Relatório Final:</h3>
+            <pre>${data.relatorio}</pre>
+          `;
+          carregarEstado();
+        });
+    };
+
+    // Carrega estado ao abrir a página
+    window.onload = carregarEstado;
+  </script>
 </body>
 </html>
